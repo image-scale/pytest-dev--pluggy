@@ -229,10 +229,11 @@ class HookSpec:
             )
         warn_on_impl_args = self.opts.get("warn_on_impl_args")
         if warn_on_impl_args:
-            # Get the argnames of the implementation
-            impl_argnames = set(varnames(hook_impl.function)[0] + varnames(hook_impl.function)[1])
-            for argname, warning in warn_on_impl_args.items():
-                if argname in impl_argnames:
+            # Warn in the order the args appear in the implementation
+            impl_argnames = hook_impl.argnames + hook_impl.kwargnames
+            for argname in impl_argnames:
+                if argname in warn_on_impl_args:
+                    warning = warn_on_impl_args[argname]
                     warnings.warn_explicit(
                         warning,
                         type(warning),
@@ -284,7 +285,7 @@ class HookImpl:
 class HookCaller:
     """A hook caller that manages hook implementations and calls them."""
 
-    __slots__ = ("name", "_hookimpls", "_hookspec", "_call_history")
+    __slots__ = ("name", "_hookimpls", "_hookspec", "_call_history", "_manager")
 
     def __init__(
         self,
@@ -292,6 +293,7 @@ class HookCaller:
         hookimpls: list[HookImpl] | None = None,
         hookspec: HookSpec | None = None,
         call_history: list[tuple[Mapping[str, object], Callable[[object], None] | None]] | None = None,
+        _manager: Any = None,
     ) -> None:
         self.name: Final[str] = name
         self._hookimpls: list[HookImpl] = hookimpls if hookimpls is not None else []
@@ -299,6 +301,7 @@ class HookCaller:
         self._call_history: list[tuple[Mapping[str, object], Callable[[object], None] | None]] | None = (
             call_history
         )
+        self._manager = _manager
 
     def has_spec(self) -> bool:
         return self._hookspec is not None
@@ -406,16 +409,29 @@ class HookCaller:
 
     def __call__(self, **kwargs: object) -> Any:
         """Call the hook with the given keyword arguments."""
-        # Import here to avoid circular imports
-        from pluggy._callers import _multicall
+        # Verify all spec args are provided (warn if not)
+        self._verify_all_args_are_provided(kwargs)
 
         firstresult = self._hookspec.opts.get("firstresult", False) if self._hookspec else False
-        return _multicall(
-            self.name,
-            self._hookimpls.copy(),
-            kwargs,
-            firstresult,
-        )
+
+        if self._manager is not None:
+            # Use the manager's _hookexec (for tracing/monitoring)
+            return self._manager._hookexec(
+                self.name,
+                self._hookimpls.copy(),
+                kwargs,
+                firstresult,
+            )
+        else:
+            # Direct call (no manager)
+            from pluggy._callers import _multicall
+
+            return _multicall(
+                self.name,
+                self._hookimpls.copy(),
+                kwargs,
+                firstresult,
+            )
 
     def call_historic(
         self,
@@ -436,15 +452,23 @@ class HookCaller:
         self._call_history.append((kwargs, result_callback))
 
         # Call all existing hookimpls
-        res = self._hookspec.opts.get("firstresult", False) if self._hookspec else False
-        from pluggy._callers import _multicall
+        firstresult = self._hookspec.opts.get("firstresult", False) if self._hookspec else False
 
-        results = _multicall(
-            self.name,
-            self._hookimpls.copy(),
-            kwargs,
-            res,
-        )
+        if self._manager is not None:
+            results = self._manager._hookexec(
+                self.name,
+                self._hookimpls.copy(),
+                kwargs,
+                firstresult,
+            )
+        else:
+            from pluggy._callers import _multicall
+            results = _multicall(
+                self.name,
+                self._hookimpls.copy(),
+                kwargs,
+                firstresult,
+            )
         if result_callback:
             if isinstance(results, list):
                 for result in results:
@@ -498,12 +522,21 @@ class HookCaller:
             insert_idx += 1
 
         firstresult = self._hookspec.opts.get("firstresult", False) if self._hookspec else False
-        return _multicall(
-            self.name,
-            combined,
-            kwargs,
-            firstresult,
-        )
+
+        if self._manager is not None:
+            return self._manager._hookexec(
+                self.name,
+                combined,
+                kwargs,
+                firstresult,
+            )
+        else:
+            return _multicall(
+                self.name,
+                combined,
+                kwargs,
+                firstresult,
+            )
 
     def _verify_all_args_are_provided(self, kwargs: Mapping[str, object]) -> None:
         """Verify that all hook spec arguments are provided, issue warning if not."""
@@ -525,15 +558,24 @@ class HookCaller:
     def _maybe_apply_history(self, hookimpl: HookImpl) -> None:
         """Apply historic calls to a newly registered hookimpl."""
         if self._call_history:
-            from pluggy._callers import _multicall
+            firstresult = self._hookspec.opts.get("firstresult", False) if self._hookspec else False
 
             for kwargs, result_callback in self._call_history:
-                res = _multicall(
-                    self.name,
-                    [hookimpl],
-                    kwargs,
-                    self._hookspec.opts.get("firstresult", False) if self._hookspec else False,
-                )
+                if self._manager is not None:
+                    res = self._manager._hookexec(
+                        self.name,
+                        [hookimpl],
+                        kwargs,
+                        firstresult,
+                    )
+                else:
+                    from pluggy._callers import _multicall
+                    res = _multicall(
+                        self.name,
+                        [hookimpl],
+                        kwargs,
+                        firstresult,
+                    )
                 if result_callback:
                     if isinstance(res, list):
                         for r in res:

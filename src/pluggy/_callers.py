@@ -114,6 +114,9 @@ def _multicall(
     # We track outcome in a Result so we can modify it
     result_obj = Result(outcome if exception is None else None, exception)
 
+    # Track the first teardown exception (for legacy hookwrappers)
+    teardown_exception: BaseException | None = None
+
     while teardowns:
         is_legacy, gen, hook_impl = teardowns.pop()
 
@@ -124,7 +127,7 @@ def _multicall(
             except StopIteration:
                 pass
             except BaseException as e:
-                # Teardown exception - warn and continue
+                # Teardown exception - warn and store first exception
                 from pluggy._warnings import PluggyTeardownRaisedWarning
                 warnings.warn(
                     PluggyTeardownRaisedWarning(
@@ -133,7 +136,11 @@ def _multicall(
                     ),
                     stacklevel=5,
                 )
+                # Store first teardown exception
+                if teardown_exception is None:
+                    teardown_exception = e
             else:
+                gen.close()  # Close the generator to run finally blocks
                 _raise_wrapfail(hook_impl, "has second yield")
         else:
             # New-style wrapper - throw exception or send result
@@ -153,6 +160,8 @@ def _multicall(
                 except BaseException as e:
                     result_obj.force_exception(e)
                 else:
+                    # Generator didn't stop - it has a second yield
+                    gen.close()  # Close the generator to run finally blocks
                     _raise_wrapfail(hook_impl, "has second yield")
             else:
                 # Send the result value
@@ -170,7 +179,13 @@ def _multicall(
                 except BaseException as e:
                     result_obj.force_exception(e)
                 else:
+                    # Generator didn't stop - it has a second yield
+                    gen.close()  # Close the generator to run finally blocks
                     _raise_wrapfail(hook_impl, "has second yield")
+
+    # If there was a teardown exception, raise it
+    if teardown_exception is not None:
+        raise teardown_exception
 
     return result_obj.get_result()
 

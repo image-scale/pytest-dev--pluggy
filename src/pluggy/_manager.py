@@ -59,16 +59,40 @@ class DistFacade:
 
 
 class _HookRelay:
-    """A namespace for hook callers that can be accessed as attributes."""
+    """A namespace for hook callers that can be accessed as attributes.
+
+    Hook callers are created lazily when first accessed through getattr.
+    Use _get_or_create_hook to explicitly create hooks for registration.
+    """
 
     def __init__(self, manager: PluginManager) -> None:
-        self._manager = manager
+        object.__setattr__(self, "_manager", manager)
+        object.__setattr__(self, "_hooks", {})
+
+    def _get_or_create_hook(self, name: str) -> HookCaller:
+        """Get an existing hook or create a new one."""
+        hooks = object.__getattribute__(self, "_hooks")
+        manager = object.__getattribute__(self, "_manager")
+        if name not in hooks:
+            hooks[name] = HookCaller(name, _manager=manager)
+        return hooks[name]
 
     def __getattr__(self, name: str) -> HookCaller:
-        # Create a new HookCaller for unknown hooks
-        hook = HookCaller(name)
-        setattr(self, name, hook)
-        return hook
+        # Return existing hook or raise AttributeError
+        hooks = object.__getattribute__(self, "_hooks")
+        if name in hooks:
+            return hooks[name]
+        raise AttributeError(name)
+
+    def __contains__(self, name: str) -> bool:
+        """Check if a hook is registered."""
+        hooks = object.__getattribute__(self, "_hooks")
+        return name in hooks
+
+    def __dir__(self) -> list[str]:
+        """Return list of registered hook names."""
+        hooks = object.__getattribute__(self, "_hooks")
+        return list(hooks.keys())
 
 
 class _SubsetHookCaller(HookCaller):
@@ -85,6 +109,7 @@ class _SubsetHookCaller(HookCaller):
         self.name = parent.name  # type: ignore[misc]
         self._hookspec = parent._hookspec
         self._call_history = parent._call_history
+        self._manager = parent._manager
         self._parent = parent
         self._removed_plugins = set(removed_plugins)
         # We don't copy _hookimpls - we filter from parent dynamically
@@ -180,8 +205,8 @@ class PluginManager:
                 # Determine which hook to register to
                 hook_name = hookimpl_opts.get("specname") or attr_name
 
-                # Ensure the hook exists
-                hook = getattr(self.hook, hook_name)
+                # Ensure the hook exists (create if needed)
+                hook = self.hook._get_or_create_hook(hook_name)
 
                 # Create hookimpl
                 hookimpl = HookImpl(plugin, name, method, hookimpl_opts)
@@ -320,10 +345,10 @@ class PluginManager:
 
     def set_blocked(self, name: str) -> None:
         """Block a plugin name from being registered."""
-        self._blocked.add(name)
-        # Unregister if already registered
+        # Unregister first if already registered (before blocking)
         if name in self._name2plugin:
             self.unregister(name=name)
+        self._blocked.add(name)
 
     def is_blocked(self, name: str) -> bool:
         """Check if a plugin name is blocked."""
@@ -354,7 +379,7 @@ class PluginManager:
             spec_opts = self.parse_hookspec_opts(module_or_class, name)
             if spec_opts is not None:
                 names.append(name)
-                hook = getattr(self.hook, name)
+                hook = self.hook._get_or_create_hook(name)
 
                 # Check for conflict
                 if hook.has_spec():
@@ -444,7 +469,9 @@ class PluginManager:
         for name in dir(self.hook):
             if name.startswith("_"):
                 continue
-            hook = getattr(self.hook, name)
+            if name not in self.hook:
+                continue
+            hook = self.hook._get_or_create_hook(name)
             if not isinstance(hook, HookCaller):
                 continue
             if hook.spec is None:
@@ -526,7 +553,7 @@ class PluginManager:
         remove_plugins: Sequence[object],
     ) -> HookCaller:
         """Return a subset HookCaller that excludes certain plugins."""
-        hook = getattr(self.hook, name)
+        hook = self.hook._get_or_create_hook(name)
         return _SubsetHookCaller(hook, remove_plugins)
 
     def parse_hookimpl_opts(
@@ -538,10 +565,16 @@ class PluginManager:
 
         Can be overridden to change how hookimpls are detected.
         """
-        method = getattr(module_or_class, name, None)
+        try:
+            method = getattr(module_or_class, name, None)
+        except Exception:
+            return None
         if method is None:
             return None
-        return getattr(method, self.project_name + "_impl", None)
+        try:
+            return getattr(method, self.project_name + "_impl", None)
+        except Exception:
+            return None
 
     def parse_hookspec_opts(
         self,
