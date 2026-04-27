@@ -4,8 +4,7 @@ from __future__ import annotations
 import inspect
 import sys
 import warnings
-from importlib.metadata import Distribution
-from importlib.metadata import distributions
+import importlib.metadata
 from typing import Any
 from typing import Callable
 from typing import Final
@@ -44,7 +43,7 @@ def _formatdef(func: Callable[..., object]) -> str:
 class DistFacade:
     """A simple Distribution facade for setuptools entrypoints."""
 
-    def __init__(self, dist: Distribution) -> None:
+    def __init__(self, dist: importlib.metadata.Distribution) -> None:
         self._dist = dist
 
     @property
@@ -191,8 +190,6 @@ class PluginManager:
         hookcallers: list[HookCaller] = []
 
         for attr_name in dir(plugin):
-            if attr_name.startswith("_"):
-                continue
             try:
                 method = getattr(plugin, attr_name)
             except Exception:
@@ -447,7 +444,7 @@ class PluginManager:
         Returns the number of plugins loaded.
         """
         count = 0
-        for dist in distributions():
+        for dist in importlib.metadata.distributions():
             for ep in dist.entry_points:
                 if ep.group != group:
                     continue

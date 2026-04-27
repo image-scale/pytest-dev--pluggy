@@ -1,6 +1,7 @@
 """Hook caller implementation for multicall."""
 from __future__ import annotations
 
+import sys
 import warnings
 from typing import Any
 from typing import Callable
@@ -42,6 +43,16 @@ def _multicall(
         result = outcome.get_result()
     """
     __tracebackhide__ = True
+
+    # Capture caller info for warning purposes (3 frames up from _multicall)
+    # Call chain: user_code -> HookCaller.__call__ -> _hookexec -> _multicall
+    try:
+        caller_frame = sys._getframe(3)
+        caller_filename = caller_frame.f_code.co_filename
+        caller_lineno = caller_frame.f_lineno
+    except ValueError:
+        caller_filename = "unknown"
+        caller_lineno = 0
 
     results: list[object] = []
     exception: BaseException | None = None
@@ -129,12 +140,15 @@ def _multicall(
             except BaseException as e:
                 # Teardown exception - warn and store first exception
                 from pluggy._warnings import PluggyTeardownRaisedWarning
-                warnings.warn(
-                    PluggyTeardownRaisedWarning(
-                        f"A hookwrapper raised in plugin '{hook_impl.plugin_name}' "
-                        f"at hook {hook_name!r}:\n{e!r}"
-                    ),
-                    stacklevel=5,
+                warning = PluggyTeardownRaisedWarning(
+                    f"A hookwrapper raised in plugin '{hook_impl.plugin_name}' "
+                    f"at hook {hook_name!r}:\n{e!r}"
+                )
+                warnings.warn_explicit(
+                    warning,
+                    type(warning),
+                    caller_filename,
+                    caller_lineno,
                 )
                 # Store first teardown exception
                 if teardown_exception is None:
